@@ -1,6 +1,7 @@
 """Models for the Docling Document data type."""
 
 import base64
+import json
 import mimetypes
 import re
 import sys
@@ -1308,6 +1309,17 @@ class DoclingDocument(BaseModel):
     def export_to_dict(self) -> Dict:
         """export_to_dict."""
         return self.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    def save_to_json_file(self, document_json_path, indent: int=4) -> int:
+        """export_to_json."""
+        with open(document_json_path, 'w') as f:
+            return f.write(self.model_dump_json(indent=indent))
+    
+    @classmethod
+    def load_from_json_file(cls, document_json_path):
+        """load_from_json."""
+        with open(document_json_path, 'r') as f:
+            return cls(**json.load(f))
 
     def export_to_markdown(  # noqa: C901
         self,
