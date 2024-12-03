@@ -7,28 +7,63 @@
 
 import importlib
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, Optional, Union
 
 import requests
 from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
+from typing_extensions import deprecated
+
+from docling_core.types.doc.utils import relative_path  # noqa
+from docling_core.types.io import DocumentStream
 
 
-def resolve_file_source(
+def resolve_remote_filename(
+    http_url: AnyHttpUrl,
+    response_headers: Dict[str, str],
+    fallback_filename="file",
+) -> str:
+    """Resolves the filename from a remote url and its response headers.
+
+    Args:
+        source AnyHttpUrl: The source http url.
+        response_headers Dict: Headers received while fetching the remote file.
+        fallback_filename str: Filename to use in case none can be determined.
+
+    Returns:
+        str: The actual filename of the remote url.
+    """
+    fname = None
+    # try to get filename from response header
+    if cont_disp := response_headers.get("Content-Disposition"):
+        for par in cont_disp.strip().split(";"):
+            # currently only handling directive "filename" (not "*filename")
+            if (split := par.split("=")) and split[0].strip() == "filename":
+                fname = "=".join(split[1:]).strip().strip("'\"") or None
+                break
+    # otherwise, use name from URL:
+    if fname is None:
+        fname = Path(http_url.path or "").name or fallback_filename
+
+    return fname
+
+
+def resolve_source_to_stream(
     source: Union[Path, AnyHttpUrl, str], headers: Optional[Dict[str, str]] = None
-) -> Path:
-    """Resolves the source (URL, path) of a file to a local file path.
-
-    If a URL is provided, the content is first downloaded to a temporary local file.
+) -> DocumentStream:
+    """Resolves the source (URL, path) of a file to a binary stream.
 
     Args:
         source (Path | AnyHttpUrl | str): The file input source. Can be a path or URL.
+        headers (Dict | None): Optional set of headers to use for fetching
+            the remote URL.
 
     Raises:
         ValueError: If source is of unexpected type.
 
     Returns:
-        Path: The local file path.
+        DocumentStream: The resolved file loaded as a stream.
     """
     try:
         http_url: AnyHttpUrl = TypeAdapter(AnyHttpUrl).validate_python(source)
@@ -44,64 +79,93 @@ def resolve_file_source(
         # fetch the page
         res = requests.get(http_url, stream=True, headers=req_headers)
         res.raise_for_status()
-        fname = None
-        # try to get filename from response header
-        if cont_disp := res.headers.get("Content-Disposition"):
-            for par in cont_disp.strip().split(";"):
-                # currently only handling directive "filename" (not "*filename")
-                if (split := par.split("=")) and split[0].strip() == "filename":
-                    fname = "=".join(split[1:]).strip().strip("'\"") or None
-                    break
-        # otherwise, use name from URL:
-        if fname is None:
-            fname = Path(http_url.path or "").name or "file"
-        local_path = Path(tempfile.mkdtemp()) / fname
-        with open(local_path, "wb") as f:
-            for chunk in res.iter_content(chunk_size=1024):  # using 1-KB chunks
-                f.write(chunk)
+        fname = resolve_remote_filename(http_url=http_url, response_headers=res.headers)
+
+        stream = BytesIO(res.content)
+        doc_stream = DocumentStream(name=fname, stream=stream)
     except ValidationError:
         try:
             local_path = TypeAdapter(Path).validate_python(source)
+            stream = BytesIO(local_path.read_bytes())
+            doc_stream = DocumentStream(name=local_path.name, stream=stream)
         except ValidationError:
             raise ValueError(f"Unexpected source type encountered: {type(source)}")
+    return doc_stream
+
+
+def _resolve_source_to_path(
+    source: Union[Path, AnyHttpUrl, str],
+    headers: Optional[Dict[str, str]] = None,
+    workdir: Optional[Path] = None,
+) -> Path:
+    doc_stream = resolve_source_to_stream(source=source, headers=headers)
+
+    # use a temporary directory if not specified
+    if workdir is None:
+        workdir = Path(tempfile.mkdtemp())
+
+    # create the parent workdir if it doesn't exist
+    workdir.mkdir(exist_ok=True, parents=True)
+
+    # save result to a local file
+    local_path = workdir / doc_stream.name
+    with local_path.open("wb") as f:
+        f.write(doc_stream.stream.read())
+
     return local_path
 
 
-def relative_path(src: Path, target: Path) -> Path:
-    """Compute the relative path from `src` to `target`.
+def resolve_source_to_path(
+    source: Union[Path, AnyHttpUrl, str],
+    headers: Optional[Dict[str, str]] = None,
+    workdir: Optional[Path] = None,
+) -> Path:
+    """Resolves the source (URL, path) of a file to a local file path.
+
+    If a URL is provided, the content is first downloaded to a local file, located in
+      the provided workdir or in a temporary directory if no workdir provided.
 
     Args:
-        src (str | Path): The source directory or file path (must be absolute).
-        target (str | Path): The target directory or file path (must be absolute).
-
-    Returns:
-        Path: The relative path from `src` to `target`.
+        source (Path | AnyHttpUrl | str): The file input source. Can be a path or URL.
+        headers (Dict | None): Optional set of headers to use for fetching
+            the remote URL.
+        workdir (Path | None): If set, the work directory where the file will
+            be downloaded, otherwise a temp dir will be used.
 
     Raises:
-        ValueError: If either `src` or `target` is not an absolute path.
+        ValueError: If source is of unexpected type.
+
+    Returns:
+        Path: The local file path.
     """
-    src = Path(src).resolve()
-    target = Path(target).resolve()
+    return _resolve_source_to_path(
+        source=source,
+        headers=headers,
+        workdir=workdir,
+    )
 
-    # Ensure both paths are absolute
-    if not src.is_absolute():
-        raise ValueError(f"The source path must be absolute: {src}")
-    if not target.is_absolute():
-        raise ValueError(f"The target path must be absolute: {target}")
 
-    # Find the common ancestor
-    common_parts = []
-    for src_part, target_part in zip(src.parts, target.parts):
-        if src_part == target_part:
-            common_parts.append(src_part)
-        else:
-            break
+@deprecated("Use `resolve_source_to_path()` or `resolve_source_to_stream()`  instead")
+def resolve_file_source(
+    source: Union[Path, AnyHttpUrl, str],
+    headers: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Resolves the source (URL, path) of a file to a local file path.
 
-    # Determine the path to go up from src to the common ancestor
-    up_segments = [".."] * (len(src.parts) - len(common_parts))
+    If a URL is provided, the content is first downloaded to a temporary local file.
 
-    # Add the path from the common ancestor to the target
-    down_segments = target.parts[len(common_parts) :]
+    Args:
+        source (Path | AnyHttpUrl | str): The file input source. Can be a path or URL.
+        headers (Dict | None): Optional set of headers to use for fetching
+            the remote URL.
 
-    # Combine and return the result
-    return Path(*up_segments, *down_segments)
+    Raises:
+        ValueError: If source is of unexpected type.
+
+    Returns:
+        Path: The local file path.
+    """
+    return _resolve_source_to_path(
+        source=source,
+        headers=headers,
+    )
