@@ -33,7 +33,7 @@ _verify_saved_output(filename=filename, paths=paths)
 # )
 # _verify_saved_output(filename=filename, paths=paths)
 
-print('filename', filename)
+# print('filename', filename)
 with open(filename, 'r') as f:
     contents = f.read()
     document_json = DoclingDocument.model_validate_json(contents)
@@ -76,4 +76,10 @@ _verify_objects_match(document, "Test Doc", document_json, "JSON-loaded Doc")
 #     f.write('\n'.join(str(document_json).split(' ')))
 
 data = jiter.from_json(bytes(contents, 'utf-8'))
-DoclingDocument(**data)
+document_jiter = DoclingDocument(**data)
+
+# uri: Union[AnyUrl, Path] = Field(union_mode='left_to_right')
+# THIS ^^ fixes the problem.
+
+# https://docs.pydantic.dev/latest/concepts/unions/#left-to-right-mode
+# https://docs.pydantic.dev/latest/concepts/unions/#smart-mode

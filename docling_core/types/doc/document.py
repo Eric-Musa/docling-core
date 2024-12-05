@@ -445,7 +445,8 @@ class ImageRef(BaseModel):
     mimetype: str
     dpi: int
     size: Size
-    uri: Union[AnyUrl, Path]
+    uri: Union[AnyUrl, Path] = Field(union_mode='left_to_right')
+    # uri: AnyUrl
     _pil: Optional[PILImage.Image] = None
 
     @property
